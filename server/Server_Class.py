@@ -54,3 +54,30 @@ class Server():
             weight_dict[key] = self.global_model.state_dict()[key] + weight_difference_dict[key]
         self.global_model.load_state_dict(weight_dict)
 
+    # 接收一个client列表，根据每个client的resources中的功耗，分配合适的量化比特预算
+    def allocate_quant_budget(self, Clients_list, Clients_list_idx = None):
+        """
+        Input: a list of Client class
+        Flow: Set the current global model to sampled clients
+        """
+        # 计算功耗权重
+        power_weights = np.zeros(len(Clients_list))
+        for client_idx in Clients_list_idx:
+            power_weights[client_idx] = Clients_list[client_idx].resources.power_limit
+
+        total_power = np.sum(power_weights)
+
+        for client_idx in Clients_list_idx:
+            # 获取每个client的功耗
+            power = Clients_list[client_idx].resources.power_limit
+            weight = power / total_power
+            # 打印显示权重
+            print(f"Client {client_idx} power weight: {weight:.4f}")
+            # 分配量化比特预算
+            if weight > 0.4:
+                Clients_list[client_idx].quant_budget = 16
+            else:
+                Clients_list[client_idx].quant_budget = 8
+
+
+

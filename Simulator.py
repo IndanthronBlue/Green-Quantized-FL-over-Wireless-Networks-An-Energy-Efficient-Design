@@ -31,9 +31,20 @@ class Simulator():
 
         self.Server = Server_Class.Server(self.args, model)
         
-        self.Clients_list = [Client_Class.Client(self.args, copy.deepcopy(self.Server.global_model), loss, 
-                                        client_id, tr_loader, te_loader, self.device, scheduler=None)
-                                        for (client_id, (tr_loader, te_loader)) in enumerate(zip(self.local_tr_data_loaders, self.local_te_data_loaders))]
+        self.Clients_list = [Client_Class.Client(
+                        self.args, 
+                        copy.deepcopy(self.Server.global_model), 
+                        loss, 
+                        client_id, 
+                        tr_loader, 
+                        te_loader, 
+                        self.device, 
+                        scheduler=None, 
+                        resources=Client_Class.ClientResources.generate_random()
+                    ) for (client_id, (tr_loader, te_loader)) in enumerate(zip(self.local_tr_data_loaders, self.local_te_data_loaders))]
+        # show all clients' resources
+        # for client_idx, client in enumerate(self.Clients_list):
+        #     self.logger.info('client_id: %d , resources: %s' %(client_idx, client.resources))
 
     def FedAvg(self):
 
@@ -47,6 +58,10 @@ class Simulator():
             self.logger.info("-"*30 + "Epoch start" + "-"*30)
 
             sampled_clients = self.Server.sample_clients()
+            self.Server.allocate_quant_budget(self.Clients_list, sampled_clients)
+            self.logger.info("sampled clients: %s" % (str(sampled_clients)))
+            self.logger.info("quant budget: %s" % (str([self.Clients_list[i].quant_budget for i in sampled_clients])))
+            self.logger.info("resources power: %s" % (str([self.Clients_list[i].resources.power_limit for i in sampled_clients])))
 
             self.Server.broadcast(self.Clients_list, sampled_clients)
             for client_idx in sampled_clients:

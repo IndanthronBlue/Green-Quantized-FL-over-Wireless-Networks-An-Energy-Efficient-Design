@@ -21,7 +21,7 @@ def parser():
     parser.add_argument('--m_bit', type = int, default = 16, help = 'quantization level for transmission')
     parser.add_argument('--schedulingsize', type=int, default = 5, help = 'how many clients will be sampled')
     parser.add_argument('--batch_size', '-b', type=int, default=32, help='batch size')
-    parser.add_argument('--comm_rounds', '-m_e', type=int, default=200, 
+    parser.add_argument('--comm_rounds', '-m_e', type=int, default=20, 
         help='the maximum communication rounds')
     parser.add_argument('--learning_rate', '-lr', type=float, default=0.001, help='learning rate')
     parser.add_argument('--momentum', type=float, default=0.9, help="SGD momentum(defalt: 0.9)")
@@ -29,7 +29,7 @@ def parser():
     parser.add_argument('--seed', default=1, help='The random seed')
     parser.add_argument('--alpha', type=float, default=0.1, help="Dirichelet concentration parameter")
     parser.add_argument('--weight_decay', type=float, default=0., help="SGD weight decay(defalt: 0.)")
-    parser.add_argument('--local_epoch', type=int, default = 1, help = "number of local iterations (default = 5)")
+    parser.add_argument('--local_epoch', type=int, default = 5, help = "number of local iterations (default = 5)")
 
     return parser.parse_args()
 
