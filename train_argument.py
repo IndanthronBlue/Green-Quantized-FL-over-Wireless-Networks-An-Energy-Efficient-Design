@@ -31,6 +31,19 @@ def parser():
     parser.add_argument('--weight_decay', type=float, default=0., help="SGD weight decay(defalt: 0.)")
     parser.add_argument('--local_epoch', type=int, default = 5, help = "number of local iterations (default = 5)")
 
+    # Qmix related
+    parser.add_argument('--use_qmix', type=bool, default=True,  # 默认启用QMIX
+                   help='是否使用QMIX算法进行客户端选择和量化预算分配')
+    parser.add_argument('--qmix_model_path', type=str, default='', help='QMIX模型加载路径')
+    parser.add_argument('--sample_ratio', type=float, default=0.1, 
+                        help='客户端采样率(默认使用schedulingsize/num_clients)')
+    parser.add_argument('--rnn_hidden_dim', type=int, default=64, help='QMIX RNN隐藏层维度')
+    parser.add_argument('--qmix_epsilon', type=float, default=0.5, help='QMIX初始探索率')
+    parser.add_argument('--qmix_epsilon_decay', type=float, default=0.995, help='QMIX探索率衰减')
+    parser.add_argument('--qmix_epsilon_min', type=float, default=0.05, help='QMIX最小探索率')
+    parser.add_argument('--energy_weight', type=float, default=0.01, help='能耗惩罚权重')
+    parser.add_argument('--time_weight', type=float, default=0.005, help='时间惩罚权重')
+
     return parser.parse_args()
 
 def print_args(args, logger=None):

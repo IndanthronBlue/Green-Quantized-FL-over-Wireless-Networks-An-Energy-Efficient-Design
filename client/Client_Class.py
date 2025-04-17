@@ -7,6 +7,7 @@ import os
 from collections import OrderedDict
 import copy
 from dataclasses import dataclass, field
+import time as py_time
 
 path = os.getcwd() #current path
 sys.path.append(os.path.abspath(os.path.join(path, os.pardir))) #import the parent directory
@@ -65,6 +66,8 @@ class ClientResources:
     GPU_available: bool
     GPU_memory_availability: float
     power_limit: float  # 新增的功耗限制属性
+    compute_capability: float = field(init=False) # 添加计算能力属性
+    
 
 
     def __post_init__(self):
@@ -83,6 +86,32 @@ class ClientResources:
             raise ValueError("GPU_memory_availability must be between 0 and 32")
         if self.power_limit < 0:
             raise ValueError("power_limit must be non-negative")
+        
+        # 计算 compute_capability
+        # 基础计算能力由 speed_factor 决定
+        base_capability = self.speed_factor * 25.0  # 基础分值
+        
+        # GPU 加成
+        gpu_bonus = 30.0 if self.GPU_available else 0.0
+        
+        # 电量状态影响 (电量过低会降低性能)
+        battery_factor = min(1.0, self.battery_level / 20.0)  # 电量低于20%时开始降低性能
+        
+        # 功率限制影响 (功率限制越高，计算能力越强)
+        power_factor = min(1.5, self.power_limit / 5.0)  # 功率限制对计算能力的影响
+        
+        # 内存影响 (内存过低会限制性能)
+        memory_factor = 1.0
+        if self.CPU_available:
+            memory_factor *= min(1.0, self.CPU_memory_availability / 4.0)  # 4GB为阈值
+        if self.GPU_available:
+            memory_factor *= min(1.0, self.GPU_memory_availability / 2.0)  # 2GB为阈值
+        
+        # 综合计算
+        self.compute_capability = (base_capability + gpu_bonus) * battery_factor * power_factor * memory_factor
+        
+        # 确保在合理范围内
+        self.compute_capability = max(10.0, min(100.0, self.compute_capability))
 
 
 
@@ -103,7 +132,7 @@ class ClientResources:
             CPU_memory_availability=random.uniform(0, 128),    # CPU memory in GB
             GPU_available=GPU_available,        # Random GPU availability
             GPU_memory_availability=random.uniform(0, 32) if GPU_available else 0,  # GPU memory if available
-            power_limit=random.uniform(0, 100)  # Power limit in range [10, 100] watts
+            power_limit=random.uniform(0, 10)  # Power limit in range [10, 100] watts
         )
 
 
@@ -124,7 +153,14 @@ class Client():
         self.quant_budget = quant_budget
     
     def local_training(self, comm_rounds):
+        """执行本地训练并返回能耗"""
+        # 保存初始模型状态用于后续计算差异
         initial = copy.deepcopy(self.model)
+        
+        # 记录训练开始时间
+        start_time = py_time.time()
+        
+        # 原有训练循环
         for epoch in range(1, self.args.local_epoch+1):
             for data, label in self.tr_loader:
                 data.to(self.device), label.to(self.device)
@@ -138,10 +174,40 @@ class Client():
 
                 if self.scheduler is not None:
                     self.scheduler.step()
+        
+        # 计算训练时间
+        training_time = py_time.time() - start_time
+        
+        # 计算模型更新差异并量化
         for name in self.model.state_dict():
             foo = self.model.state_dict()[name] - initial.state_dict()[name]
             quantized_foo = self.uniform_quantize(foo)
             self.model_difference[name] = quantized_foo
+        
+        # 计算能耗
+        # 量化因子：量化位数与32位全精度的比率
+        quant_factor = self.quant_budget / 32.0
+        
+        # 数据量因子：数据集大小对能耗的影响
+        data_size = len(self.tr_loader.dataset)
+        data_factor = data_size / 1000.0  # 归一化数据量
+        
+        # 设备计算能力因子
+        # 考虑CPU/GPU可用性和速度因子
+        compute_capability = self.resources.compute_capability
+        
+        # 计算总能耗
+        # 能耗 = 功率限制 × 训练时间 × 量化因子 × 数据因子 / 计算能力因子
+        energy_consumption = (
+            self.resources.power_limit * 
+            training_time * 
+            quant_factor * 
+            data_factor / 
+            compute_capability
+        )
+        
+        # 返回能耗值，供Simulator记录和优化
+        return energy_consumption
             
     def local_test(self):
 
