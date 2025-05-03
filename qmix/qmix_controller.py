@@ -61,9 +61,9 @@ class QMIXController:
         self.buffer = deque(maxlen=10000)
         
         # 探索参数
-        self.epsilon = 0.5
-        self.epsilon_decay = 0.995
-        self.epsilon_min = 0.05
+        self.epsilon = args.qmix_epsilon
+        self.epsilon_decay = args.qmix_epsilon_decay
+        self.epsilon_min = args.qmix_epsilon_min
         
         # 训练参数
         self.gamma = qmix_args.gamma

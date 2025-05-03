@@ -160,10 +160,15 @@ class Client():
         # 记录训练开始时间
         start_time = py_time.time()
         
+        # 记录操作和参数数量
+        num_parameters = sum(p.numel() for p in self.model.parameters())
+        total_data_samples = len(self.tr_loader.dataset)
+        total_batches = len(self.tr_loader)
+        
         # 原有训练循环
         for epoch in range(1, self.args.local_epoch+1):
             for data, label in self.tr_loader:
-                data.to(self.device), label.to(self.device)
+                data, label = data.to(self.device), label.to(self.device)
                 self.model.train()
                 output = self.model(data)
                 loss_val = self.loss(output, label)
@@ -184,29 +189,30 @@ class Client():
             quantized_foo = self.uniform_quantize(foo)
             self.model_difference[name] = quantized_foo
         
-        # 计算能耗
-        # 量化因子：量化位数与32位全精度的比率
-        quant_factor = self.quant_budget / 32.0
+        # 更加精确的能耗计算
+        # 基础能耗：与计算资源和训练时间成正比
+        base_energy = self.resources.power_limit * training_time
+        
+        # 量化因子：量化位数与32位全精度的比率，量化位数越低能耗越低
+        quant_factor = (self.quant_budget / 32.0) ** 1.5
         
         # 数据量因子：数据集大小对能耗的影响
         data_size = len(self.tr_loader.dataset)
-        data_factor = data_size / 1000.0  # 归一化数据量
+        data_factor = (data_size / 1000.0) ** 0.8  # 使用次线性关系，因为批处理有效率
+
+        # 通信能耗：与模型大小和量化精度有关
+        comm_energy = (num_parameters * self.quant_budget / 8) / (self.resources.bandwidth + 1e-6) * 0.01
         
-        # 设备计算能力因子
-        # 考虑CPU/GPU可用性和速度因子
-        compute_capability = self.resources.compute_capability
+        # 总能耗 = 基础能耗 * 量化因子 * 数据因子 * 效率因子 + 通信能耗
+        energy_consumption = base_energy * quant_factor * data_factor + comm_energy
         
-        # 计算总能耗
-        # 能耗 = 功率限制 × 训练时间 × 量化因子 × 数据因子 / 计算能力因子
-        energy_consumption = (
-            self.resources.power_limit * 
-            training_time * 
-            quant_factor * 
-            data_factor / 
-            compute_capability
-        )
+        # 添加一些随机波动，模拟真实环境
+        energy_variation = random.uniform(0.9, 1.1)
+        energy_consumption *= energy_variation
         
-        # 返回能耗值，供Simulator记录和优化
+        # 记录客户端ID和通信轮次以便于调试
+        # print(f"Client {self.client_id}, Round {comm_rounds}: Energy = {energy_consumption:.4f} J")
+        
         return energy_consumption
             
     def local_test(self):

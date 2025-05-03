@@ -19,7 +19,6 @@ class Simulator():
         self.args = args
         self.logger = logger
         self.Clients_list = None
-        self.Clients_list = None
         self.Server = None
         self.local_tr_data_loaders = local_tr_data_loaders
         self.local_te_data_loaders = local_te_data_loaders
@@ -30,7 +29,7 @@ class Simulator():
         self.qmix_controller = None
         
         # 量化预算选项
-        args.quant_budget_options = [1, 2, 4, 8, 16, 32]
+        args.quant_budget_options = [8, 16, 32]
         
         # 存储当前回合数据
         self.current_state = None
@@ -39,24 +38,29 @@ class Simulator():
         self.prev_global_acc = 0
 
 
-    def initialization(self, model):
-
+    def initialization(self, model, client_resources=None):
         """初始化模拟器"""
         loss = nn.CrossEntropyLoss()
         self.Server = Server_Class.Server(self.args, model)
         
         # 创建客户端
-        self.Clients_list = [Client_Class.Client(
-                        self.args, 
-                        copy.deepcopy(self.Server.global_model), 
-                        loss, 
-                        client_id, 
-                        tr_loader, 
-                        te_loader, 
-                        self.device, 
-                        scheduler=None, 
-                        resources=Client_Class.ClientResources.generate_random()
-                    ) for (client_id, (tr_loader, te_loader)) in enumerate(zip(self.local_tr_data_loaders, self.local_te_data_loaders))]
+        self.Clients_list = []
+        for client_id, (tr_loader, te_loader) in enumerate(zip(self.local_tr_data_loaders, self.local_te_data_loaders)):
+            # 如果提供了客户端资源列表，使用它；否则随机生成
+            resources = client_resources[client_id] if client_resources else Client_Class.ClientResources.generate_random()
+            
+            client = Client_Class.Client(
+                self.args, 
+                copy.deepcopy(self.Server.global_model), 
+                loss, 
+                client_id, 
+                tr_loader, 
+                te_loader, 
+                self.device, 
+                scheduler=None, 
+                resources=resources
+            )
+            self.Clients_list.append(client)
         
         # 如果启用QMIX，初始化控制器
         if self.use_qmix:
@@ -66,6 +70,7 @@ class Simulator():
             # 加载模型（如果指定）
             if hasattr(self.args, 'qmix_model_path') and self.args.qmix_model_path:
                 self.qmix_controller.load_model(self.args.qmix_model_path)
+                
 
     def get_client_observation(self, client):
         """获取客户端的观察向量"""
@@ -88,7 +93,7 @@ class Simulator():
     def calculate_reward(self, prev_acc, current_acc, energy_consumption, time_spent):
         """计算奖励函数"""
         # 奖励 = 精度提升 - 能耗惩罚
-        accuracy_improvement = (current_acc - prev_acc) * 100  # 精度提升（放大100倍）
+        accuracy_improvement = (current_acc - prev_acc) * 200  # 精度提升（放大100倍）
         energy_penalty = energy_consumption * 0.01  # 能耗惩罚
         time_penalty = time_spent * 0.005  # 时间惩罚
         
@@ -182,13 +187,15 @@ class Simulator():
         """执行联邦学习过程"""
         best_acc = 0
         acc_history = []
+        energy_history = []  # 记录每轮的能量消耗
+        total_energy = 0     # 总能耗
         current_global_acc = 0
 
         for rounds in np.arange(self.args.comm_rounds):
             begin_time = time()
-            avg_acc =[]
-            avg_loss =[]
-            energy_consumption = 0
+            avg_acc = []
+            avg_loss = []
+            round_energy_consumption = 0  # 当前轮次的能量消耗
             self.logger.info("-"*30 + "Epoch start" + "-"*30)
 
             # 存储前一轮的精度用于计算奖励
@@ -221,11 +228,21 @@ class Simulator():
             for client_idx in sampled_clients:
                 # 本地训练并返回能耗
                 client_energy = self.Clients_list[client_idx].local_training(rounds)
-                energy_consumption += client_energy
+                round_energy_consumption += client_energy
+                self.logger.info(f"客户端 {client_idx} 能耗: {client_energy:.4f} J")
             train_time = time() - train_start_time
             
+            # 更新总能耗
+            total_energy += round_energy_consumption
+            energy_history.append(round_energy_consumption)
+            
             # 模型聚合
-            self.Server.aggregation(self.Clients_list, sampled_clients)
+            if hasattr(self.args, 'aggregation_method') and self.args.aggregation_method == 'original':
+                self.logger.info("使用原始聚合方法 (均等权重)")
+                self.Server.aggregation_ori(self.Clients_list, sampled_clients)
+            else:
+                self.logger.info("使用加权聚合方法 (基于量化精度)")
+                self.Server.aggregation(self.Clients_list, sampled_clients)
             
             # 计算平均精度
             avg_acc_round = np.mean(avg_acc)
@@ -236,11 +253,11 @@ class Simulator():
             if self.use_qmix and rounds > 0 and self.current_state is not None:
                 # 计算奖励
                 reward = self.calculate_reward(prev_global_acc, current_global_acc, 
-                                               energy_consumption, train_time)
+                                               round_energy_consumption, train_time)
                 # 输出奖励详情
                 self.logger.info("----- QMIX奖励信息 -----")
                 self.logger.info(f"精度变化: {prev_global_acc:.4f} -> {current_global_acc:.4f} (变化: {(current_global_acc-prev_global_acc)*100:.2f}%)")
-                self.logger.info(f"能耗: {energy_consumption:.2f}, 训练时间: {train_time:.2f}秒")
+                self.logger.info(f"能耗: {round_energy_consumption:.2f}, 训练时间: {train_time:.2f}秒")
                 self.logger.info(f"计算得到的奖励: {reward:.4f}")
 
                 # 获取下一个状态和观察
@@ -268,7 +285,7 @@ class Simulator():
             
             round_time = time() - begin_time
             self.logger.info('round: %d, avg_acc: %.3f, energy: %.2f, time: %.2f' %(
-                rounds, avg_acc_round, energy_consumption, round_time))
+                rounds, avg_acc_round, round_energy_consumption, round_time))
             
             # 更新最佳精度
             if avg_acc_round > best_acc:
@@ -289,12 +306,15 @@ class Simulator():
         self.logger.info(">>>>> Training process finish")
         self.logger.info("Best test accuracy {:.4f}".format(best_acc))  
         self.logger.info("Final test accuracy {:.4f}".format(final_avg_acc))
+        self.logger.info("Total energy consumption {:.4f}".format(total_energy))
         self.logger.info(">>>>> Accuracy history during training")
         self.logger.info(acc_history)
+        self.logger.info(">>>>> Energy consumption history during training")
+        self.logger.info(energy_history)
         
         # 保存最终QMIX模型
         if self.use_qmix:
             self.qmix_controller.save_model("./models/qmix_final.pt")
         
-        return best_acc, final_avg_acc, acc_history
+        return best_acc, final_avg_acc, acc_history, energy_history, total_energy
 

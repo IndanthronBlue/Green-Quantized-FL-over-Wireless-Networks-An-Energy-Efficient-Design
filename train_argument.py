@@ -44,6 +44,16 @@ def parser():
     parser.add_argument('--energy_weight', type=float, default=0.01, help='能耗惩罚权重')
     parser.add_argument('--time_weight', type=float, default=0.005, help='时间惩罚权重')
 
+    # 性能比较
+    parser.add_argument('--aggregation_method', type=str, choices=['original', 'weighted', 'compare'], 
+                    default='compare', help='选择聚合方法: original=原始均等权重, weighted=基于量化精度的加权, compare=两种方法同时运行并比较')
+    parser.add_argument('--log_aggregation_weights', type=lambda x: str(x).lower() == 'true', 
+                    default=True, help='是否记录聚合权重到日志')
+    parser.add_argument('--save_comparison_plot', type=lambda x: str(x).lower() == 'true',
+                    default=True, help='是否保存比较结果图表')
+    parser.add_argument('--comparison_mode', type=str, choices=['none', 'aggregation', 'comprehensive'], 
+                default='comprehensive', help='比较模式: none=无比较模式, aggregation=仅比较聚合方法, comprehensive=全面比较QMIX和聚合方法')
+
     return parser.parse_args()
 
 def print_args(args, logger=None):

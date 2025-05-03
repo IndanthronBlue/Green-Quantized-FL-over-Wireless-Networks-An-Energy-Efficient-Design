@@ -29,30 +29,30 @@ class Server():
             with torch.no_grad():
                 Clients_list[client_idx].model.load_state_dict(copy.deepcopy(self.global_model.state_dict()))
 
-    # def aggregation(self, Clients_list, sampling_set):
-    #     """
-    #     Input: sampling_set: array of integers, which corresponds to the indices of sampled devices and a list of Client class
-    #     Flow: aggregate the updated threholds in the sampling set
-    #     """
-    #     #You can change the weights of clients arbitrarily 
-    #     #For simplicy, we use 1/args.schedulingsize here
+    def aggregation_ori(self, Clients_list, sampling_set):
+        """
+        Input: sampling_set: array of integers, which corresponds to the indices of sampled devices and a list of Client class
+        Flow: aggregate the updated threholds in the sampling set
+        """
+        #You can change the weights of clients arbitrarily 
+        #For simplicy, we use 1/args.schedulingsize here
     
 
-    #     weight_dict = OrderedDict()
+        weight_dict = OrderedDict()
 
-    #     weight_difference_dict = OrderedDict()
-    #     for i, client in enumerate(sampling_set):
-    #         local_difference = Clients_list[client].model_difference
-    #         if i == 0:
-    #             for key in local_difference.keys():
-    #                 weight_difference_dict[key] = local_difference[key] * 1/self.args.schedulingsize
-    #         else:
-    #             for key in local_difference.keys():
-    #                 weight_difference_dict[key] += local_difference[key] *1/self.args.schedulingsize
+        weight_difference_dict = OrderedDict()
+        for i, client in enumerate(sampling_set):
+            local_difference = Clients_list[client].model_difference
+            if i == 0:
+                for key in local_difference.keys():
+                    weight_difference_dict[key] = local_difference[key] * 1/self.args.schedulingsize
+            else:
+                for key in local_difference.keys():
+                    weight_difference_dict[key] += local_difference[key] *1/self.args.schedulingsize
 
-    #     for key in weight_difference_dict.keys():
-    #         weight_dict[key] = self.global_model.state_dict()[key] + weight_difference_dict[key]
-    #     self.global_model.load_state_dict(weight_dict)
+        for key in weight_difference_dict.keys():
+            weight_dict[key] = self.global_model.state_dict()[key] + weight_difference_dict[key]
+        self.global_model.load_state_dict(weight_dict)
 
     def aggregation(self, Clients_list, sampling_set):
         """
@@ -138,11 +138,13 @@ class Server():
             weight = power / total_power
             # 打印显示权重
             print(f"Client {client_idx} power weight: {weight:.4f}")
-            # 分配量化比特预算
-            if weight > 0.4:
+            # 分配量化比特预算[8, 16, 32]，根据权重进行分配
+            if weight < 0.2:
+                Clients_list[client_idx].quant_budget = 8
+            elif weight < 0.5:
                 Clients_list[client_idx].quant_budget = 16
             else:
-                Clients_list[client_idx].quant_budget = 8
+                Clients_list[client_idx].quant_budget = 32
 
 
 
