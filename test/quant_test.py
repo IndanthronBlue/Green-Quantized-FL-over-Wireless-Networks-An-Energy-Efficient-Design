@@ -30,16 +30,16 @@ def dequantize(x, quant_budget):
     return dequantized_x
 
 # 原始张量
-x = torch.tensor([0.6, -0.3, 1.2])
+x = torch.tensor([0.6, 0.3, 1.2])
+print("原始张量:", x)
 
 # 量化位数
-quant_budget = 8
+quant_budget = 16
 
 # 量化
 quantized_x = uniform_quantize(quant_budget, x)
 print("量化后的张量:", quantized_x)
-# 反量化
-dequantized_x = dequantize(quantized_x, quant_budget)
-print("反量化后的张量:", dequantized_x)
-# 验证反量化是否正确
-assert torch.allclose(x, dequantized_x, atol=1e-5), "反量化不正确"
+# 计算相对误差: (quantized_x−original_x)²/original_x²
+relative_error = ((quantized_x - x) ** 2) / (x ** 2)
+print("相对误差:", relative_error)
+

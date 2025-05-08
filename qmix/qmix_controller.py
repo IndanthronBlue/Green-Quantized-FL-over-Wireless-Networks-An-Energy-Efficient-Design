@@ -68,7 +68,7 @@ class QMIXController:
         # 训练参数
         self.gamma = qmix_args.gamma
         self.grad_norm_clip = qmix_args.grad_norm_clip
-        self.target_update_cycle = 200
+        self.target_update_cycle = 10
         self.train_step = 0
         
         # 维护隐藏状态
