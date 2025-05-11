@@ -8,18 +8,18 @@ def parser():
     # 扩展模型选择
     parser.add_argument('--model', 
                       choices=["Base_CNN", "ResNet18", "ResNet34", "MobileNet", "LSTM"],
-                      default="ResNet18",
+                      default="Base_CNN",
                       help='选择模型架构') 
     
     # 数据集选择
     parser.add_argument('--dataset', 
                       choices=['mnist', 'cifar10', 'cifar100', 'tiny-imagenet', 'shakespeare'],
-                      default='cifar10',
+                      default='mnist',
                       help='选择数据集')
     
     # 是否使用量化模型
     parser.add_argument('--use_quantized_model', type=lambda x: str(x).lower() == 'true',
-                      default=False, 
+                      default=True, 
                       help='是否使用量化版本的模型')
     
     # 新增Shakespeare数据集的参数
@@ -48,7 +48,7 @@ def parser():
     parser.add_argument('--m_bit', type = int, default = 16, help = 'quantization level for transmission')
     parser.add_argument('--schedulingsize', type=int, default = 5, help = 'how many clients will be sampled')
     parser.add_argument('--batch_size', '-b', type=int, default=32, help='batch size')
-    parser.add_argument('--comm_rounds', '-m_e', type=int, default=150, 
+    parser.add_argument('--comm_rounds', '-m_e', type=int, default=200, 
         help='the maximum communication rounds')
     parser.add_argument('--learning_rate', '-lr', type=float, default=0.001, help='learning rate')
     parser.add_argument('--momentum', type=float, default=0.9, help="SGD momentum(defalt: 0.9)")
@@ -70,6 +70,8 @@ def parser():
     parser.add_argument('--qmix_epsilon_min', type=float, default=0.05, help='QMIX最小探索率')
     parser.add_argument('--energy_weight', type=float, default=0.01, help='能耗惩罚权重')
     parser.add_argument('--time_weight', type=float, default=0.005, help='时间惩罚权重')
+    parser.add_argument('--validation_sample_size', type=int, default=500, 
+                    help='验证阶段使用的最大样本数量')
 
     # 性能比较
     parser.add_argument('--aggregation_method', type=str, choices=['original', 'weighted', 'compare'], 

@@ -4,15 +4,16 @@ import numpy as np
 from qmix.qmix_module import QMixNet, RNNAgent
 import random
 from collections import deque
+import torch.nn.functional as F  # 添加这一行导入 F
 
 class QMIXController:
     def __init__(self, args, device):
         self.args = args
         self.device = device
         self.n_agents = args.num_clients
-        self.n_actions = len(args.quant_budget_options)
-        self.state_shape = 4 * args.num_clients  # 全局状态大小
-        self.obs_shape = 4  # 局部观察大小
+        self.n_actions = len(args.quant_budget_options) + 1
+        self.state_shape = 5 * args.num_clients  # 全局状态大小
+        self.obs_shape = 5  # 局部观察大小
         
         # 配置QMIX网络参数
         qmix_args = type('QMixArgs', (), {
@@ -25,8 +26,8 @@ class QMIXController:
             'hyper_hidden_dim': 64,
             'two_hyper_layers': True,
             'gamma': 0.99,
-            'lr': 0.001,
-            'grad_norm_clip': 10,
+            'lr': 0.0005,
+            'grad_norm_clip': 5,
         })
         
         # 初始化智能体网络
@@ -58,7 +59,7 @@ class QMIXController:
         self.optimizer = torch.optim.Adam(self.params, lr=qmix_args.lr)
         
         # 创建经验回放缓冲区
-        self.buffer = deque(maxlen=10000)
+        self.buffer = deque(maxlen=50000)
         
         # 探索参数
         self.epsilon = args.qmix_epsilon
@@ -68,7 +69,7 @@ class QMIXController:
         # 训练参数
         self.gamma = qmix_args.gamma
         self.grad_norm_clip = qmix_args.grad_norm_clip
-        self.target_update_cycle = 10
+        self.target_update_cycle = 5
         self.train_step = 0
         
         # 维护隐藏状态
@@ -114,7 +115,7 @@ class QMIXController:
         self.buffer.append(transition)
     
     def train(self, batch_size=32):
-        """训练QMIX网络"""
+        """优化的QMIX网络训练方法，解决Loss过高问题"""
         if len(self.buffer) < batch_size:
             return None
         
@@ -131,6 +132,9 @@ class QMIXController:
         next_state = torch.tensor(np.array([s['next_state'] for s in samples]), dtype=torch.float32).to(self.device)
         done = torch.tensor(np.array([s['done'] for s in samples]), dtype=torch.float32).unsqueeze(-1).to(self.device)
         
+        # 1. 奖励裁剪，避免目标值过大
+        reward = torch.clamp(reward, -10.0, 10.0)
+        
         # 计算当前Q值
         q_values = []
         for i in range(self.n_agents):
@@ -144,46 +148,82 @@ class QMIXController:
         
         # 选择动作的Q值
         chosen_action_qvals = torch.gather(q_values, dim=2, 
-                                         index=actions.unsqueeze(-1)).squeeze(-1)
+                                        index=actions.unsqueeze(-1)).squeeze(-1)
         
-        # 计算目标Q值
+        # 计算目标Q值 - 实现Double Q-learning
         target_q_values = []
+        next_actions = []
+        
+        # 2. 使用当前网络选择动作，目标网络评估动作 (Double DQN)
         for i in range(self.n_agents):
             agent_next_obs = next_obs[:, i]
             hidden = torch.zeros(batch_size, self.args.rnn_hidden_dim).to(self.device)
+            
+            # 使用当前网络选择动作
+            current_q, _ = self.agents[i](agent_next_obs, hidden)
+            next_action = current_q.max(dim=1)[1]
+            next_actions.append(next_action)
+            
+            # 使用目标网络评估动作
             next_q, _ = self.target_agents[i](agent_next_obs, hidden)
             target_q_values.append(next_q)
         
         # 堆叠所有智能体的目标Q值
         target_q_values = torch.stack(target_q_values, dim=1)
+        next_actions = torch.stack(next_actions, dim=1).unsqueeze(-1)
         
-        # 计算最大Q值
-        max_action_qvals, _ = target_q_values.max(dim=2)
+        # 使用Double DQN选择的动作的Q值
+        double_q_values = torch.gather(target_q_values, dim=2, index=next_actions).squeeze(-1)
         
-        # 混合Q值
+        # 3. 混合Q值
         chosen_action_qvals = self.qmix_net(chosen_action_qvals, state)
-        max_action_qvals = self.target_qmix_net(max_action_qvals, next_state)
+        max_action_qvals = self.target_qmix_net(double_q_values, next_state)
         
-        # 计算目标
-        targets = reward + self.gamma * (1 - done) * max_action_qvals
+        # 4. 计算目标，添加噪声增强鲁棒性
+        noise_scale = 0.01
+        noise = torch.randn_like(max_action_qvals) * noise_scale
+        targets = reward + self.gamma * (1 - done) * (max_action_qvals + noise)
         
-        # 计算TD误差和损失
+        # 5. 应用TD误差裁剪，避免异常值影响
         td_error = (chosen_action_qvals - targets.detach())
-        loss = (td_error ** 2).mean()
+        # 动态TD误差裁剪阈值 - 根据当前batch计算
+        clip_threshold = 3.0 * td_error.abs().mean().item()
+        td_error = torch.clamp(td_error, -clip_threshold, clip_threshold)
+        
+        # 6. 使用Huber损失替代MSE，更加鲁棒
+        delta = 1.0  # Huber损失的阈值参数
+        huber_loss = 0.5 * (td_error.abs() <= delta).float() * td_error.pow(2) + \
+                    (td_error.abs() > delta).float() * delta * (td_error.abs() - 0.5 * delta)
+        loss = huber_loss.mean()
+        
+        # 7. 添加L2正则化，但减小系数
+        l2_reg = 0.00005  # 降低正则化系数
+        l2_norm = sum(p.pow(2.0).sum() for p in self.params)
+        loss = loss + l2_reg * l2_norm
         
         # 优化
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.params, self.grad_norm_clip)
+        
+        # 8. 降低梯度裁剪阈值，防止更新过大
+        torch.nn.utils.clip_grad_norm_(self.params, self.grad_norm_clip * 0.5)
         self.optimizer.step()
         
-        # 更新目标网络
-        self.train_step += 1
+        # 9. 软更新目标网络参数 (软更新比硬更新更稳定)
         if self.train_step % self.target_update_cycle == 0:
+            tau = 0.01  # 软更新系数
             for i in range(self.n_agents):
-                self.target_agents[i].load_state_dict(self.agents[i].state_dict())
-            self.target_qmix_net.load_state_dict(self.qmix_net.state_dict())
+                for target_param, param in zip(self.target_agents[i].parameters(), self.agents[i].parameters()):
+                    target_param.data.copy_(
+                        tau * param.data + (1 - tau) * target_param.data
+                    )
+                    
+                for target_param, param in zip(self.target_qmix_net.parameters(), self.qmix_net.parameters()):
+                    target_param.data.copy_(
+                        tau * param.data + (1 - tau) * target_param.data
+                    )
         
+        self.train_step += 1
         return loss.item()
     
     def reset_hidden_states(self):

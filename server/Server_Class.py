@@ -93,8 +93,7 @@ class Server():
             # 3. 量化误差权重（已计算，为error_weights[i]）
             
             # 组合权重（调整各因素的重要性）
-            # 量化误差权重占50%，其他因素占50%
-            weight = error_weights[i] * 0.5 + data_weight * 0.5
+            weight = error_weights[i] * 0.8 + data_weight * 0.2
             client_weights.append(weight)
             
             # 收集日志信息

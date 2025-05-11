@@ -134,7 +134,7 @@ class ClientResources:
 
         return ClientResources(
             speed_factor=random.uniform(1.0, 2.0),
-            battery_level=random.uniform(8000, 10000),
+            battery_level=random.uniform(20000, 30000),
             bandwidth=random.uniform(1, 100),
             dataset_size=random.randint(*dataset_size_range),
             CPU_available=True,  # 确保CPU可用
@@ -377,3 +377,103 @@ class Client():
             m = float(2 ** (self.quant_budget - 1))
             out = torch.round(x * m) / m
             return out
+        
+    def validation_training(self, max_samples):
+        """在有限数据子集上执行1轮训练并在验证集上验证，返回准确率"""
+        # 确保有验证集
+        if not hasattr(self, 'validation_data') or self.validation_data is None:
+            return 0.0, 0.0, 0.0
+        
+        # 记录开始时间
+        start_time = py_time.time()
+        
+        # 保存当前模型副本
+        original_model = copy.deepcopy(self.model)
+        
+        # 设定使用全精度训练
+        original_quant = self.quant_budget
+        self.quant_budget = 16
+        
+        # 准备有限的训练数据
+        limited_train_data = []
+        limited_train_labels = []
+        samples_collected = 0
+        
+        # 从本地数据集中收集有限样本
+        for data, labels in self.tr_loader:
+            batch_size = data.shape[0]
+            if samples_collected + batch_size > max_samples:
+                # 只取需要的部分
+                needed = max_samples - samples_collected
+                limited_train_data.append(data[:needed])
+                limited_train_labels.append(labels[:needed])
+                samples_collected += needed
+                break
+            else:
+                limited_train_data.append(data)
+                limited_train_labels.append(labels)
+                samples_collected += batch_size
+                
+            if samples_collected >= max_samples:
+                break
+        
+        # 如果没有收集到足够数据，直接返回
+        if samples_collected == 0:
+            self.quant_budget = original_quant
+            return 0.0, 0.0, 0.0
+        
+        # 合并数据
+        train_data = torch.cat(limited_train_data, 0)
+        train_labels = torch.cat(limited_train_labels, 0)
+        
+        # 在有限数据上训练一个epoch
+        self.model.train()
+        for i in range(0, train_data.shape[0], self.args.batch_size):
+            end_idx = min(i + self.args.batch_size, train_data.shape[0])
+            data = train_data[i:end_idx].to(self.device)
+            labels = train_labels[i:end_idx].to(self.device)
+            
+            output = self.model(data)
+            loss_val = self.loss(output, labels)
+            
+            self.optimizer.zero_grad()
+            loss_val.backward()
+            self.optimizer.step()
+        
+        # 在验证集上评估
+        self.model.eval()
+        correct = 0
+        total = 0
+        
+        with torch.no_grad():
+            for i in range(0, self.validation_data.shape[0], self.validation_batch_size):
+                end_idx = min(i + self.validation_batch_size, self.validation_data.shape[0])
+                data = self.validation_data[i:end_idx].to(self.device)
+                labels = self.validation_labels[i:end_idx].to(self.device)
+                
+                outputs = self.model(data)
+                _, predicted = torch.max(outputs.data, 1)
+                
+                total += labels.size(0)
+                correct += (predicted == labels).sum().item()
+        
+        # 计算准确率
+        accuracy = 100.0 * correct / total if total > 0 else 0.0
+        
+        # 计算用时
+        validation_time = py_time.time() - start_time
+        
+        # 计算能耗
+        validation_energy = self.resources.training_power * validation_time
+        
+        # 消耗电池电量
+        self.resources.battery_level = max(0, self.resources.battery_level - validation_energy)
+        
+        # 保存验证精度
+        self.validation_accuracy = accuracy
+        
+        # 恢复原始模型和量化设置
+        self.model.load_state_dict(original_model.state_dict())
+        self.quant_budget = original_quant
+        
+        return accuracy, validation_energy, validation_time

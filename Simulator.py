@@ -85,14 +85,22 @@ class Simulator():
                 
 
     def get_client_observation(self, client):
-        """获取客户端的观察向量"""
-        # 特征：电池电量、训练功率、数据量、当前量化精度
+        """获取客户端的观察向量 - 现在是5维"""
+        # 特征：电池电量、验证集准确率、数据量、上轮训练时间、当前量化精度
         battery = client.resources.battery_level / 2000.0  # 归一化
-        training_power = client.resources.training_power / 10.0  # 归一化
+        valid_acc = client.validation_accuracy / 100.0 if hasattr(client, 'validation_accuracy') else 0.0  # 新增
         data_size = len(client.tr_loader.dataset) / 1000.0  # 归一化
+        train_time = client.last_training_time / 60.0 if hasattr(client, 'last_training_time') else 0.0  # 新增
         quant = client.quant_budget / 32.0  # 归一化
+
+        # 确保数值在合理范围内
+        battery = max(0.0, min(1.0, battery))
+        valid_acc = max(0.0, min(1.0, valid_acc))
+        data_size = max(0.0, min(1.0, data_size))
+        train_time = max(0.0, min(1.0, train_time))
+        quant = max(0.0, min(1.0, quant))
         
-        return [battery, training_power, data_size, quant]
+        return [battery, valid_acc, data_size, train_time, quant]
     
     def get_global_state(self, global_acc, round_idx):
         """获取全局状态"""
@@ -150,7 +158,7 @@ class Simulator():
     def calculate_reward(self, prev_acc, current_acc, energy_consumption, time_spent, clients_involved):
         """计算奖励函数，引入多目标评估"""
         # 基础奖励组件 - 精度提升
-        accuracy_improvement = (current_acc - prev_acc) * 200
+        accuracy_improvement = (current_acc - prev_acc) * 100
         
         # 惩罚组件 - 能耗和时间
         energy_penalty = energy_consumption * 0.01
@@ -235,7 +243,7 @@ class Simulator():
         self.logger.info(f"最终选择的客户端: {sampled_clients}")
         
         return sampled_clients
-
+    
     def select_clients_with_qmix(self, round_idx, global_acc):
         """使用QMIX选择客户端和分配量化精度，同时考虑电量情况"""
         # 获取所有客户端的观察
@@ -352,7 +360,8 @@ class Simulator():
             
             # 客户端选择和量化精度分配
             if self.use_qmix:
-                sampled_clients = self.select_clients_with_qmix(rounds, current_global_acc)
+                # sampled_clients = self.select_clients_with_qmix(rounds, current_global_acc)
+                sampled_clients = self.select_clients_with_qmix_new(rounds, current_global_acc)
             else:
                 # 使用原始方法，但加入电量检查
                 sampled_clients = self.select_clients_traditional(rounds)
@@ -566,3 +575,174 @@ class Simulator():
             self.qmix_controller.save_model(self.args.qmix_model_folder + "/final_qmix_model.pt")
         
         return best_acc, final_acc, acc_history, energy_history, total_energy, time_history, total_time
+    
+    # ======新方法=====
+    def select_clients_with_qmix_new(self, round_idx, global_acc):
+        """二阶段客户端选择：先执行验证，再基于QMIX选择参与客户端"""
+        # Step 1: 创建和分发验证集
+        if not hasattr(self, 'validation_set'):
+            # 从测试数据中创建一个小的验证集
+            self.create_validation_set()
+        
+        # Step 2: 分发全局模型和验证集到所有客户端
+        self.broadcast_model_and_validation(round_idx)
+        
+        # Step 3: 让所有客户端在小数据集上执行一轮训练并验证
+        self.execute_validation_phase(round_idx)
+        
+        # Step 4: 获取所有客户端的观察向量
+        observations = [self.get_client_observation(client) for client in self.Clients_list]
+        
+        # Step 5: 获取全局状态
+        global_state = self.get_global_state(global_acc, round_idx)
+        
+        # 存储当前状态和观察，用于后续训练
+        self.current_state = global_state
+        self.current_obs = observations
+        
+        # 重置QMIX控制器的隐藏状态
+        self.qmix_controller.reset_hidden_states()
+        
+        # Step 6: 使用QMIX选择动作（参与度和量化精度）
+        actions = self.qmix_controller.select_actions(observations)
+        self.current_actions = actions
+        
+        # 记录决策日志
+        self.logger.info("----- QMIX决策信息 -----")
+        self.logger.info(f"当前轮次: {round_idx}, 当前全局精度: {global_acc:.4f}")
+        self.logger.info(f"探索率(epsilon): {self.qmix_controller.epsilon:.4f}")
+        
+        # 显示每个客户端的特征和QMIX决策
+        self.logger.info("客户端状态和QMIX决策:")
+        for i, (obs, action) in enumerate(zip(observations, actions)):
+            action_desc = "不参与" if action == 0 else f"参与, {self.args.quant_budget_options[action-1]}位"
+            self.logger.info(f"客户端 {i}: 电量={obs[0]*2000:.1f}J, 验证精度={obs[1]*100:.2f}%, " +
+                            f"数据量={obs[2]*1000:.0f}, 训练时间={obs[3]*60:.2f}s, 决策={action_desc}")
+        
+        # 根据QMIX动作选择参与客户端
+        selected_clients = []
+        for i, action in enumerate(actions):
+            if action > 0:  # 动作大于0表示参与训练
+                # 设置量化精度 (1→8位, 2→16位, 3→32位)
+                self.Clients_list[i].quant_budget = self.args.quant_budget_options[action-1]
+                
+                # 检查客户端电量是否足够
+                required_energy, _ = self.Clients_list[i].estimate_energy_requirement()
+                if self.Clients_list[i].resources.battery_level >= required_energy and self.Clients_list[i].has_sufficient_energy:
+                    selected_clients.append(i)
+        
+        # Step 7: 客户端补充选择机制
+        required_clients = max(1, int(self.args.num_clients * self.args.sample_ratio))
+        
+        if len(selected_clients) < required_clients:
+            self.logger.info(f"QMIX选择的客户端数量({len(selected_clients)})小于要求({required_clients})，执行补充选择")
+            
+            # 计算未选中客户端的价值
+            available_clients = []
+            client_values = {}
+            
+            for i, client in enumerate(self.Clients_list):
+                if i not in selected_clients:  # 只考虑未被选中的客户端
+                    # 检查电量是否足够
+                    required_energy, _ = client.estimate_energy_requirement()
+                    
+                    if client.resources.battery_level >= required_energy and client.has_sufficient_energy:
+                        # 计算价值：验证准确率/电量消耗
+                        validation_acc = client.validation_accuracy if hasattr(client, 'validation_accuracy') else 0.0
+                        power_factor = client.resources.training_power / 10.0
+                        
+                        # 避免除以零
+                        if power_factor > 0:
+                            value = validation_acc / power_factor
+                        else:
+                            value = validation_acc
+                        
+                        client_values[i] = value
+                        available_clients.append(i)
+            
+            # 按价值排序并选择
+            sorted_clients = sorted(available_clients, key=lambda i: client_values.get(i, 0), reverse=True)
+            needed_clients = required_clients - len(selected_clients)
+            additional_clients = sorted_clients[:needed_clients]
+            
+            # 为补充选择的客户端设置默认量化精度（16位）
+            for i in additional_clients:
+                self.Clients_list[i].quant_budget = 16
+                selected_clients.append(i)
+                
+            self.logger.info(f"补充选择了 {len(additional_clients)} 个客户端: {additional_clients}")
+        
+        self.logger.info(f"最终选择的客户端: {selected_clients}, 总计 {len(selected_clients)} 个")
+        self.logger.info("------------------------")
+        
+        return selected_clients
+
+    def create_validation_set(self):
+        """创建一个通用的验证集，用于所有客户端"""
+        # 从测试数据中采样一部分作为验证集
+        all_test_data = []
+        all_test_labels = []
+        
+        # 收集所有测试数据
+        for loader in self.local_te_data_loaders:
+            for data, labels in loader:
+                all_test_data.append(data)
+                all_test_labels.append(labels)
+                
+        # 合并数据
+        if all_test_data:
+            val_data = torch.cat(all_test_data, 0)
+            val_labels = torch.cat(all_test_labels, 0)
+            
+            # 随机采样一个适当大小的验证集
+            total_samples = val_data.shape[0]
+            val_size = min(1000, total_samples // 2)  # 最多1000个样本
+            
+            # 随机抽样
+            indices = torch.randperm(total_samples)[:val_size]
+            self.validation_data = val_data[indices]
+            self.validation_labels = val_labels[indices]
+            
+            self.validation_batch_size = 32
+            self.logger.info(f"创建了大小为 {val_size} 的公共验证集")
+        else:
+            self.logger.warning("无法创建验证集：无测试数据")
+            self.validation_data = None
+            self.validation_labels = None
+
+    def broadcast_model_and_validation(self, round_idx):
+        """向所有客户端分发全局模型和验证集"""
+        self.logger.info("正在向所有客户端分发全局模型和验证集...")
+        
+        # 确保验证集存在
+        if not hasattr(self, 'validation_data') or self.validation_data is None:
+            self.create_validation_set()
+        
+        # 向所有客户端分发全局模型
+        for client in self.Clients_list:
+            with torch.no_grad():
+                client.model.load_state_dict(copy.deepcopy(self.Server.global_model.state_dict()))
+            
+            # 设置验证集
+            client.validation_data = self.validation_data
+            client.validation_labels = self.validation_labels
+            client.validation_batch_size = self.validation_batch_size
+
+    def execute_validation_phase(self, round_idx):
+        """执行验证阶段：每个客户端在小数据集上训练并验证"""
+        self.logger.info("正在执行验证阶段...")
+        
+        # 设定最大训练样本数B
+        max_samples = self.args.validation_sample_size if hasattr(self.args, 'validation_sample_size') else 500
+        
+        for i, client in enumerate(self.Clients_list):
+            # 跳过电量不足的客户端
+            if not client.has_sufficient_energy:
+                self.logger.info(f"客户端 {i} 电量不足，跳过验证阶段")
+                client.validation_accuracy = 0.0
+                continue
+                
+            # 在有限数据集上训练一个epoch，然后验证
+            val_accuracy, val_energy, val_time = client.validation_training(max_samples)
+            
+            self.logger.info(f"客户端 {i} 验证结果: 准确率={val_accuracy:.2f}%, 能耗={val_energy:.2f}J, 用时={val_time:.2f}s")
