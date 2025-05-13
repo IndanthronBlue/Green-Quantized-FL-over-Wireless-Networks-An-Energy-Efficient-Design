@@ -43,12 +43,14 @@ def parser():
     current_time = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
     parser.add_argument('--affix', default='natural_train_'+current_time, help='the affix for the save folder')
     ## Training realted 
-    parser.add_argument('--num_clients', '-N', type=int, default=50, help='number of clients')
+    parser.add_argument('--num_clients', '-N', type=int, default=30, help='number of clients')
+    parser.add_argument('--schedulingsize', type=int, default = 6, help = 'how many clients will be sampled')
+    parser.add_argument('--sample_ratio', type=float, default=0.2, 
+                        help='客户端采样率(默认使用schedulingsize/num_clients)')
     parser.add_argument('--n_bit', type = int, default = 16, help = 'quantization level for local training')
     parser.add_argument('--m_bit', type = int, default = 16, help = 'quantization level for transmission')
-    parser.add_argument('--schedulingsize', type=int, default = 5, help = 'how many clients will be sampled')
-    parser.add_argument('--batch_size', '-b', type=int, default=32, help='batch size')
-    parser.add_argument('--comm_rounds', '-m_e', type=int, default=200, 
+    parser.add_argument('--batch_size', '-b', type=int, default=64, help='batch size')
+    parser.add_argument('--comm_rounds', '-m_e', type=int, default=30, 
         help='the maximum communication rounds')
     parser.add_argument('--learning_rate', '-lr', type=float, default=0.001, help='learning rate')
     parser.add_argument('--momentum', type=float, default=0.9, help="SGD momentum(defalt: 0.9)")
@@ -62,15 +64,13 @@ def parser():
     parser.add_argument('--use_qmix', type=bool, default=True,  # 默认启用QMIX
                    help='是否使用QMIX算法进行客户端选择和量化预算分配')
     parser.add_argument('--qmix_model_path', type=str, default='', help='QMIX模型加载路径')
-    parser.add_argument('--sample_ratio', type=float, default=0.1, 
-                        help='客户端采样率(默认使用schedulingsize/num_clients)')
     parser.add_argument('--rnn_hidden_dim', type=int, default=64, help='QMIX RNN隐藏层维度')
     parser.add_argument('--qmix_epsilon', type=float, default=0.5, help='QMIX初始探索率')
     parser.add_argument('--qmix_epsilon_decay', type=float, default=0.995, help='QMIX探索率衰减')
     parser.add_argument('--qmix_epsilon_min', type=float, default=0.05, help='QMIX最小探索率')
     parser.add_argument('--energy_weight', type=float, default=0.01, help='能耗惩罚权重')
     parser.add_argument('--time_weight', type=float, default=0.005, help='时间惩罚权重')
-    parser.add_argument('--validation_sample_size', type=int, default=500, 
+    parser.add_argument('--validation_sample_size', type=int, default=1000, 
                     help='验证阶段使用的最大样本数量')
 
     # 性能比较

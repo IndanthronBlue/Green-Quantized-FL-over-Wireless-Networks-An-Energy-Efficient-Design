@@ -134,7 +134,7 @@ class ClientResources:
 
         return ClientResources(
             speed_factor=random.uniform(1.0, 2.0),
-            battery_level=random.uniform(20000, 30000),
+            battery_level=random.uniform(10000, 20000),
             bandwidth=random.uniform(1, 100),
             dataset_size=random.randint(*dataset_size_range),
             CPU_available=True,  # 确保CPU可用
@@ -166,12 +166,21 @@ class Client():
         self.last_transmission_time = 0.0  # 传输时间记录
         self.has_sufficient_energy = True  # 是否有足够能量参与训练
         self.inactive_rounds = 0  # 连续不活动轮数
+        self.last_training_time = -1.0  # 添加上一轮训练时间，初始为-1表示从未训练
+        self.validation_accuracy = 0.0  # 确保validation_accuracy属性存在
     
     def estimate_energy_requirement(self):
-        """估算一轮训练所需的总能量消耗（焦耳）"""
+        """估算一轮训练所需的总能量消耗（焦耳），利用历史训练时间提高准确性"""
         # 估计训练时间
         data_size = len(self.tr_loader.dataset)
-        estimated_training_time = 0.01 * data_size / max(1.0, self.resources.compute_capability)
+        
+        # 如果有历史训练时间，使用历史数据来估计
+        if self.last_training_time > 0:
+            # 使用历史训练时间作为基准，但考虑可能的波动和变化
+            estimated_training_time = self.last_training_time * random.uniform(0.9, 1.1)
+        else:
+            # 没有历史数据时，使用基于数据量和计算能力的启发式方法
+            estimated_training_time = 0.01 * data_size / max(1.0, self.resources.compute_capability)
         
         # 估计训练能耗
         training_energy = self.resources.training_power * estimated_training_time
@@ -192,7 +201,8 @@ class Client():
         # 总能耗估计 (增加20%的安全边际)
         total_energy = (training_energy + transmission_energy + waiting_energy) * 1.2
         
-        return total_energy, total_energy
+        # 返回估计的总能耗和原始估计值（用于调试）
+        return total_energy, estimated_training_time
     
     def local_training(self, comm_rounds):
         """执行本地训练并返回能耗、时间和成功状态"""
@@ -204,7 +214,7 @@ class Client():
             self.inactive_rounds += 1
             print(f"警告：客户端 {self.client_id} 电量不足，无法支持训练 (电量: {self.resources.battery_level:.1f}J, 需要: {required_energy:.1f}J)")
             return 0, 0, 0, False  # 返回0能耗、0训练时间、0传输时间和失败标志
-    
+
         # 保存初始模型状态用于后续计算差异
         initial = copy.deepcopy(self.model)
         
@@ -265,13 +275,13 @@ class Client():
         
         # 计算训练时间
         training_time = py_time.time() - start_time
+        self.last_training_time = training_time  # 保存这次的训练时间用于下次估计
         
         # 计算传输时间
         self.last_transmission_time = self.calculate_transmission_time(num_parameters)
 
         # 计算训练能耗
         training_energy_consumption = self.resources.training_power * training_time
-        # training_energy_consumption = self.resources.training_power * training_time
         
         # 传输能耗计算 - 基于传输功率和传输时间
         transmission_energy_consumption = self.resources.transmission_power * self.last_transmission_time
@@ -386,6 +396,8 @@ class Client():
         
         # 记录开始时间
         start_time = py_time.time()
+        # 增加训练轮次
+        num_epochs = 2  # 增加到2个epoch
         
         # 保存当前模型副本
         original_model = copy.deepcopy(self.model)
@@ -426,19 +438,25 @@ class Client():
         train_data = torch.cat(limited_train_data, 0)
         train_labels = torch.cat(limited_train_labels, 0)
         
-        # 在有限数据上训练一个epoch
+        # 在有限数据上训练多个epoch
         self.model.train()
-        for i in range(0, train_data.shape[0], self.args.batch_size):
-            end_idx = min(i + self.args.batch_size, train_data.shape[0])
-            data = train_data[i:end_idx].to(self.device)
-            labels = train_labels[i:end_idx].to(self.device)
-            
-            output = self.model(data)
-            loss_val = self.loss(output, labels)
-            
-            self.optimizer.zero_grad()
-            loss_val.backward()
-            self.optimizer.step()
+        for epoch in range(num_epochs):
+            # 训练时打乱数据顺序增加随机性
+            if epoch > 0:
+                indices = torch.randperm(train_data.shape[0])
+                train_data = train_data[indices]
+                train_labels = train_labels[indices]
+            for i in range(0, train_data.shape[0], self.args.batch_size):
+                end_idx = min(i + self.args.batch_size, train_data.shape[0])
+                data = train_data[i:end_idx].to(self.device)
+                labels = train_labels[i:end_idx].to(self.device)
+                
+                output = self.model(data)
+                loss_val = self.loss(output, labels)
+                
+                self.optimizer.zero_grad()
+                loss_val.backward()
+                self.optimizer.step()
         
         # 在验证集上评估
         self.model.eval()
@@ -459,6 +477,7 @@ class Client():
         
         # 计算准确率
         accuracy = 100.0 * correct / total if total > 0 else 0.0
+        print(f"客户端 {self.client_id} 验证准确率: {accuracy:.2f}%")
         
         # 计算用时
         validation_time = py_time.time() - start_time
